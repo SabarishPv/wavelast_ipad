@@ -28,14 +28,36 @@ final class WaveLastUITests: XCTestCase {
         app.descendants(matching: .any)[id].firstMatch
     }
 
+    /// Any element (button, cell, text…) whose accessibility label matches.
+    private func labeled(_ text: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", text)).firstMatch
+    }
+
+    /// Waits for an element; on failure reports what IS on screen so CI
+    /// annotations show the actual UI state.
+    private func assertAppears(
+        _ e: XCUIElement, _ what: String, timeout: TimeInterval = 10,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        guard !e.waitForExistence(timeout: timeout) else { return }
+        let labels = app.descendants(matching: .any).allElementsBoundByIndex.prefix(150)
+            .map(\.label).filter { !$0.isEmpty }
+        XCTFail(
+            "\(what) did not appear. Visible labels: \(labels.joined(separator: " | ").prefix(1200))",
+            file: file, line: line)
+    }
+
+    /// Sidebar rows: the identifier can land on the row's icon, which is not
+    /// hittable, so tap the list cell that contains it.
     private func openSidebar(_ id: String) {
-        let item = element("sidebar.\(id)")
-        if !item.waitForExistence(timeout: 5) {
+        let identifier = "sidebar.\(id)"
+        if !element(identifier).waitForExistence(timeout: 5) {
             // Portrait / compact: show the sidebar first.
             app.navigationBars.buttons.element(boundBy: 0).tap()
         }
-        XCTAssertTrue(item.waitForExistence(timeout: 5), "sidebar item \(id)")
-        item.tap()
+        assertAppears(element(identifier), "sidebar item \(id)", timeout: 5)
+        let cell = app.cells.containing(.any, identifier: identifier).firstMatch
+        (cell.exists ? cell : element(identifier)).tap()
     }
 
     func testLaunchShowsLibraryWithFixtures() {
@@ -53,9 +75,9 @@ final class WaveLastUITests: XCTestCase {
             XCTAssertTrue(app.navigationBars[title].waitForExistence(timeout: 5), "navigated to \(title)")
         }
         openSidebar("discover")
-        XCTAssertTrue(app.staticTexts["Connect Last.fm"].waitForExistence(timeout: 5), "Discover explains it needs Last.fm")
+        assertAppears(labeled("Connect Last.fm"), "Discover explains it needs Last.fm", timeout: 5)
         openSidebar("server")
-        XCTAssertTrue(app.staticTexts["No music server"].waitForExistence(timeout: 5))
+        assertAppears(labeled("No music server"), "Music Server empty state", timeout: 5)
     }
 
     func testPlayTrackOpenNowPlayingAndControl() {
@@ -113,9 +135,10 @@ final class WaveLastUITests: XCTestCase {
         XCTAssertTrue(element("miniplayer.open").waitForExistence(timeout: 10))
         element("miniplayer.open").tap()
         openPanel("Lyrics")
-        XCTAssertTrue(app.staticTexts["First fixture line"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.staticTexts["Second fixture line"].exists)
-        XCTAssertTrue(app.staticTexts["Synced lyrics from Local .lrc file"].exists)
+        // Lyric lines carry the button trait (tap to seek), so match by label.
+        assertAppears(labeled("First fixture line"), "first lyric line")
+        assertAppears(labeled("Second fixture line"), "second lyric line", timeout: 2)
+        assertAppears(labeled("Synced lyrics from Local .lrc file"), "lyrics source footer", timeout: 2)
         attachScreenshot("lyrics")
     }
 

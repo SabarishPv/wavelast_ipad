@@ -127,7 +127,7 @@ jobs:
           for f in "$LOGS"/*.log; do
             body=$(perl -pe 's/\e\[[0-9;]*m//g' "$f" \
               | grep -E "error:|✘|FAIL - |\*\* (BUILD|TEST) FAILED|Testing failed|failed \(|XCTAssert|Fatal error|Assertion failed" \
-              | grep -v "ld: warning" | sed "s|$GITHUB_WORKSPACE/||g" | cut -c1-400 | head -60 || true)
+              | grep -v "ld: warning" | sed "s|$GITHUB_WORKSPACE/||g" | cut -c1-1500 | head -60 || true)
             [ -n "$body" ] || continue
             body=${body//'%'/'%25'}
             body=${body//$'\r'/'%0D'}
