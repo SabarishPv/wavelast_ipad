@@ -44,7 +44,7 @@ jobs:
     timeout-minutes: 75
     steps:
       - name: Check out
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Show revision and toolchain
         run: |
@@ -115,6 +115,25 @@ jobs:
             -resultBundlePath "$REPORTS/WaveLast.xcresult" \
             CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= \
             2>&1 | tee "$LOGS/app-tests-ipad.log"
+
+      - name: Publish failure details as annotations
+        if: failure()
+        run: |
+          # Raw logs are uploaded as artifacts, but those need a signed-in
+          # account to download. Also publish the key error lines as
+          # annotations (visible on the public run page and via the API).
+          # GitHub caps annotations per step, so lines are bundled per log.
+          shopt -s nullglob
+          for f in "$LOGS"/*.log; do
+            body=$(perl -pe 's/\e\[[0-9;]*m//g' "$f" \
+              | grep -E "error:|✘|FAIL - |\*\* (BUILD|TEST) FAILED|Testing failed|failed \(|XCTAssert|Fatal error|Assertion failed" \
+              | grep -v "ld: warning" | sed "s|$GITHUB_WORKSPACE/||g" | cut -c1-400 | head -60 || true)
+            [ -n "$body" ] || continue
+            body=${body//'%'/'%25'}
+            body=${body//$'\r'/'%0D'}
+            body=${body//$'\n'/'%0A'}
+            echo "::error title=$(basename "$f")::$body"
+          done
 
       - name: Compiler warnings report
         if: always()
@@ -195,7 +214,7 @@ jobs:
 
       - name: Upload test reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: test-reports
           path: |
@@ -206,7 +225,7 @@ jobs:
 
       - name: Upload build logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: build-logs
           path: build/logs/
@@ -215,7 +234,7 @@ jobs:
 
       - name: Upload simulator app
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: simulator-app
           path: |
@@ -225,7 +244,7 @@ jobs:
 
       - name: Upload unsigned device IPA
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: unsigned-ipa
           path: |
