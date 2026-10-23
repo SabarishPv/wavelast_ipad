@@ -20,6 +20,11 @@ public struct LastFMCredentials: Codable, Equatable, Sendable {
 public struct LastFMSession: Codable, Equatable, Sendable {
     public var username: String
     public var key: String
+
+    public init(username: String, key: String) {
+        self.username = username
+        self.key = key
+    }
 }
 
 /// Error codes documented at https://www.last.fm/api/errorcodes

@@ -31,5 +31,11 @@ let package = Package(
             name: "WaveLastPlaybackTests",
             dependencies: ["WaveLastPlayback", "WaveLastCore"]
         ),
+        // Imports the modules WITHOUT @testable, so anything the app needs
+        // that is accidentally internal fails here instead of in the app build.
+        .testTarget(
+            name: "WaveLastPublicAPITests",
+            dependencies: ["WaveLastPlayback", "WaveLastCore"]
+        ),
     ]
 )
