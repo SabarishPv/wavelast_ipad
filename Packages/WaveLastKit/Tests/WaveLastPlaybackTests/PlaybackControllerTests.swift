@@ -21,7 +21,7 @@ struct PlaybackControllerTests {
         let c = controller()
         c.play([makeTrack(1), makeTrack(2)])
         #expect(c.status == .loading)
-        await settle()
+        await settle(c)
         #expect(engine.loaded.count == 1)
         #expect(engine.loaded[0].0.url.lastPathComponent == "t1.m4a")
         #expect(engine.loaded[0].1 == true, "autoplay")
@@ -34,15 +34,15 @@ struct PlaybackControllerTests {
     @Test func finishingAdvancesAndEndOfQueueEnds() async {
         let c = controller()
         c.play([makeTrack(1), makeTrack(2)])
-        await settle()
+        await settle(c)
         engine.startPlaying()
         engine.emit(.finished)
-        await settle()
+        await settle(c)
         #expect(c.currentTrack?.id == "t2")
         #expect(engine.loaded.count == 2)
         engine.startPlaying()
         engine.emit(.finished)
-        await settle()
+        await settle(c)
         #expect(c.status == .ended)
         #expect(c.currentTrack?.id == "t2", "stays on the last track")
     }
@@ -51,10 +51,10 @@ struct PlaybackControllerTests {
         let c = controller()
         c.play([makeTrack(1), makeTrack(2)])
         c.setRepeat(.one)
-        await settle()
+        await settle(c)
         engine.startPlaying()
         engine.emit(.finished)
-        await settle()
+        await settle(c)
         #expect(c.currentTrack?.id == "t1")
         #expect(engine.loaded.count == 2)
     }
@@ -62,7 +62,7 @@ struct PlaybackControllerTests {
     @Test func pauseResumeAndToggle() async {
         let c = controller()
         c.play([makeTrack(1)])
-        await settle()
+        await settle(c)
         engine.startPlaying()
         c.togglePlayPause()
         #expect(engine.calls.last == "pause")
@@ -77,7 +77,7 @@ struct PlaybackControllerTests {
     @Test func bufferingStallAndRecovery() async {
         let c = controller()
         c.play([makeTrack(1)])
-        await settle()
+        await settle(c)
         engine.startPlaying()
         engine.emit(.stalled)
         #expect(c.status == .buffering)
@@ -89,7 +89,7 @@ struct PlaybackControllerTests {
     @Test func previousRestartsWhenPastThreshold() async {
         let c = controller()
         c.play([makeTrack(1), makeTrack(2)], startAt: 1)
-        await settle()
+        await settle(c)
         engine.startPlaying()
         engine.emit(.time(10))
         c.previous()
@@ -97,19 +97,23 @@ struct PlaybackControllerTests {
         #expect(engine.calls.last == "seek 0")
         engine.emit(.time(1))
         c.previous()
-        await settle()
+        await settle(c)
         #expect(c.currentTrack?.id == "t1")
     }
 
     @Test func staleResolveIsIgnored() async {
-        // t1 resolves slowly; the user picks t2 before it finishes.
-        let c = controller(FakeSource(delays: ["t1": 150_000_000]))
+        // t1's resolve is held open; the user skips to t2 meanwhile. When t1's
+        // resolve finally returns it must be discarded, not loaded.
+        let gate = ResolveGate()
+        let c = controller(FakeSource(gates: ["t1": gate]))
         c.play([makeTrack(1), makeTrack(2)])
-        await settle()
+        for _ in 0..<10 { await Task.yield() }
         c.next()
-        await settle()
-        try? await Task.sleep(nanoseconds: 250_000_000)
-        await settle()
+        await settle(c)
+        #expect(engine.loaded.map(\.0.url.lastPathComponent) == ["t2.m4a"])
+        gate.release()
+        let dropped = await waitUntil { c.droppedStaleResults == 1 }
+        #expect(dropped, "the late t1 result must reach the generation guard and be dropped")
         #expect(engine.loaded.map(\.0.url.lastPathComponent) == ["t2.m4a"], "t1 must never be loaded after t2 was chosen")
         #expect(c.currentTrack?.id == "t2")
     }
@@ -117,14 +121,14 @@ struct PlaybackControllerTests {
     @Test func brokenTracksAreSkippedButNotForever() async {
         let c = controller(FakeSource(failing: ["t1", "t2"]))
         c.play([makeTrack(1), makeTrack(2), makeTrack(3)])
-        await settle(40)
+        await settle(c)
         #expect(c.currentTrack?.id == "t3")
         #expect(engine.loaded.count == 1)
 
         let engine2 = FakeEngine()
         let c2 = PlaybackController(engine: engine2, sources: SourceRegistry([FakeSource(failing: ["t1", "t2", "t3", "t4"])]), store: nil)
         c2.play((1...4).map { makeTrack($0) })
-        await settle(60)
+        await settle(c2)
         if case .failed(let f) = c2.status {
             #expect(f.kind == .fileMissing)
         } else {
@@ -137,7 +141,7 @@ struct PlaybackControllerTests {
     @Test func engineFailureIsReported() async {
         let c = controller()
         c.play([makeTrack(1)])
-        await settle()
+        await settle(c)
         engine.emit(.failed(PlaybackFailure(.unsupportedFormat, "nope")))
         #expect(c.status == .failed(PlaybackFailure(.unsupportedFormat, "nope")))
         #expect(c.lastError == "nope")
@@ -146,14 +150,14 @@ struct PlaybackControllerTests {
     @Test func missingSourceGivesClearError() async {
         let c = controller()
         c.play([Track(id: "s", title: "s", artist: "", source: .subsonic, location: .subsonic(songID: "1"))])
-        await settle()
+        await settle(c)
         #expect(c.lastError?.contains("isn't set up") == true)
     }
 
     @Test func queueEditsWhilePlaying() async {
         let c = controller()
         c.play([makeTrack(1), makeTrack(2)])
-        await settle()
+        await settle(c)
         engine.startPlaying()
         c.playNext([makeTrack(5)])
         c.addToQueue([makeTrack(6)])
@@ -164,7 +168,7 @@ struct PlaybackControllerTests {
 
         // Removing the playing entry moves on to the next one.
         c.removeFromQueue(ids: [c.queue.entries[0].id])
-        await settle()
+        await settle(c)
         #expect(c.currentTrack?.id == "t6")
         #expect(engine.loaded.count == 2)
         c.removeFromQueue(ids: Set(c.queue.entries.map(\.id)))
@@ -175,23 +179,23 @@ struct PlaybackControllerTests {
     @Test func addingToEmptyQueueStartsPlayback() async {
         let c = controller()
         c.addToQueue([makeTrack(1)])
-        await settle()
+        await settle(c)
         #expect(engine.loaded.count == 1)
     }
 
     @Test func selectingQueueEntryPlaysIt() async {
         let c = controller()
         c.play((1...3).map { makeTrack($0) })
-        await settle()
+        await settle(c)
         c.select(entryID: c.queue.entries[2].id)
-        await settle()
+        await settle(c)
         #expect(engine.loaded.last?.0.url.lastPathComponent == "t3.m4a")
     }
 
     @Test func queueIsPersistedAndRestoredPaused() async throws {
         let c = controller()
         c.play((1...3).map { makeTrack($0) }, startAt: 1)
-        await settle()
+        await settle(c)
         engine.startPlaying()
         engine.emit(.time(30))
         c.pause()
@@ -199,7 +203,7 @@ struct PlaybackControllerTests {
         let engine2 = FakeEngine()
         let c2 = PlaybackController(engine: engine2, sources: SourceRegistry([FakeSource()]), store: store)
         c2.restore()
-        await settle()
+        await settle(c2)
         #expect(c2.currentTrack?.id == "t2")
         #expect(engine2.loaded.first?.1 == false, "restored queue must not start playing by itself")
         #expect(engine2.loaded.first?.0.startPosition == 30)
@@ -208,7 +212,7 @@ struct PlaybackControllerTests {
     @Test func pressingPlayWhileLoadingStartsWhenReady() async {
         let c = controller()
         c.play([makeTrack(1)])
-        await settle()
+        await settle(c)
         c.pause()  // user changes mind during load…
         c.resume()  // …and back again
         engine.emit(.ready(duration: 100))
@@ -218,7 +222,7 @@ struct PlaybackControllerTests {
     @Test func pausingWhileLoadingKeepsItPaused() async {
         let c = controller()
         c.play([makeTrack(1)])
-        await settle()
+        await settle(c)
         c.pause()
         engine.emit(.ready(duration: 100))
         #expect(engine.calls.last == "pause")
@@ -230,7 +234,7 @@ struct PlaybackControllerTests {
         let s = RecordingScrobbler()
         c.scrobbler = s
         c.play([makeTrack(1)])
-        await settle()
+        await settle(c)
         engine.startPlaying()
         engine.emit(.paused)
         engine.emit(.playing)
@@ -243,7 +247,7 @@ struct PlaybackControllerTests {
         let s = RecordingScrobbler()
         c.scrobbler = s
         c.play([makeTrack(1, duration: 100), makeTrack(2, duration: 100)])
-        await settle()
+        await settle(c)
         engine.startPlaying(duration: 100)
         // Seek straight to the end: jumping does not count as listening.
         engine.emit(.time(0))
@@ -262,7 +266,7 @@ struct PlaybackControllerTests {
         let s = RecordingScrobbler()
         c.scrobbler = s
         c.play([makeTrack(1, duration: 100)])
-        await settle()
+        await settle(c)
         engine.startPlaying(duration: 100)
         engine.emit(.paused)
         engine.tick(from: 0, seconds: 90)
@@ -272,7 +276,7 @@ struct PlaybackControllerTests {
     @Test func podcastProgressIsSavedAndResumed() async throws {
         let c = controller(FakeSource(), extra: [FakeSource(id: .podcast)])
         c.play([podcastTrack("ep1")])
-        await settle()
+        await settle(c)
         engine.startPlaying(duration: 3600)
         engine.tick(from: 0, seconds: 25)
         c.pause()
@@ -282,14 +286,14 @@ struct PlaybackControllerTests {
         let engine2 = FakeEngine()
         let c2 = PlaybackController(engine: engine2, sources: SourceRegistry([FakeSource(id: .podcast)]), store: store)
         c2.play([podcastTrack("ep1")])
-        await settle()
+        await settle(c2)
         #expect((engine2.loaded.first?.0.startPosition ?? 0) >= 24, "episode resumes where it stopped")
     }
 
     @Test func finishedPodcastIsMarkedCompleted() async throws {
         let c = controller(FakeSource(), extra: [FakeSource(id: .podcast)])
         c.play([podcastTrack("ep2")])
-        await settle()
+        await settle(c)
         engine.startPlaying(duration: 3600)
         engine.emit(.finished)
         #expect(try store.progress(episodeKey: "ep2")?.completed == true)
@@ -298,7 +302,7 @@ struct PlaybackControllerTests {
     @Test func interruptionPausesAndResumesOnlyIfPlaying() async {
         let c = controller()
         c.play([makeTrack(1)])
-        await settle()
+        await settle(c)
         engine.startPlaying()
         c.handleAudioSession(.interruptionBegan)
         #expect(engine.calls.last == "pause")
@@ -319,7 +323,7 @@ struct PlaybackControllerTests {
     @Test func headphonesUnpluggedPauses() async {
         let c = controller()
         c.play([makeTrack(1)])
-        await settle()
+        await settle(c)
         engine.startPlaying()
         c.handleAudioSession(.routeChanged(.newDeviceAvailable))
         #expect(engine.calls.last != "pause")
@@ -330,11 +334,11 @@ struct PlaybackControllerTests {
     @Test func mediaServicesResetReloadsCurrentTrack() async {
         let c = controller()
         c.play([makeTrack(1)])
-        await settle()
+        await settle(c)
         engine.startPlaying()
         engine.emit(.time(42))
         c.handleAudioSession(.mediaServicesReset)
-        await settle()
+        await settle(c)
         #expect(engine.loaded.count == 2)
         #expect(engine.loaded.last?.0.startPosition == 42)
         #expect(engine.loaded.last?.1 == false)
@@ -344,7 +348,7 @@ struct PlaybackControllerTests {
         let c = controller()
         #expect(c.handleRemote(.play) == false, "nothing to play")
         c.play([makeTrack(1), makeTrack(2)])
-        await settle()
+        await settle(c)
         engine.startPlaying()
         #expect(c.handleRemote(.pause))
         #expect(engine.calls.last == "pause")
@@ -357,7 +361,7 @@ struct PlaybackControllerTests {
     @Test func seekIsClampedToDuration() async {
         let c = controller()
         c.play([makeTrack(1)])
-        await settle()
+        await settle(c)
         engine.startPlaying(duration: 100)
         c.seek(to: 500)
         #expect(engine.calls.last == "seek 100")

@@ -47,18 +47,18 @@ struct FakeSource: SourceProvider {
     let displayName = "Fake"
     let capabilities: SourceCapabilities = []
     var failing: Set<String> = []
-    var delays: [String: UInt64] = [:]
+    var gates: [String: ResolveGate] = [:]
 
-    init(id: SourceID = .local, failing: Set<String> = [], delays: [String: UInt64] = [:]) {
+    init(id: SourceID = .local, failing: Set<String> = [], gates: [String: ResolveGate] = [:]) {
         self.id = id
         self.failing = failing
-        self.delays = delays
+        self.gates = gates
     }
 
     func search(_ query: String) async throws -> [Track] { [] }
 
     func resolve(_ track: Track) async throws -> PlayableItem {
-        if let d = delays[track.id] { try await Task.sleep(nanoseconds: d) }
+        if let g = gates[track.id] { await g.wait() }
         if failing.contains(track.id) { throw SourceError.trackNotFound }
         return PlayableItem(url: URL(fileURLWithPath: "/tmp/\(track.id).m4a"))
     }
@@ -86,12 +86,52 @@ func podcastTrack(_ id: String = "ep") -> Track {
             enclosureURL: URL(string: "https://cdn.e.com/\(id).mp3")!))
 }
 
-/// Waits for pending resolve tasks (they hop through the main actor).
+/// Waits until the controller has no resolve in flight, then lets the
+/// main actor run any follow-up work. Deterministic: no fixed sleeps.
 @MainActor
-func settle(_ times: Int = 20) async {
-    for _ in 0..<times { await Task.yield() }
-    try? await Task.sleep(nanoseconds: 20_000_000)
-    for _ in 0..<times { await Task.yield() }
+func settle(_ c: PlaybackController) async {
+    await c.waitForPendingResolve()
+    for _ in 0..<10 { await Task.yield() }
+}
+
+/// Polls `condition` on the main actor until it holds or `timeout` passes.
+@MainActor
+func waitUntil(timeout: TimeInterval = 5, _ condition: () -> Bool) async -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !condition() {
+        if Date() > deadline { return false }
+        try? await Task.sleep(nanoseconds: 5_000_000)
+    }
+    return true
+}
+
+/// Holds a resolve until the test releases it. Deliberately ignores task
+/// cancellation so tests exercise the controller's generation guard, not
+/// just cooperative cancellation.
+final class ResolveGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
+
+    func wait() async {
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            let resumeNow: Bool = lock.withLock {
+                if released { return true }
+                continuation = c
+                return false
+            }
+            if resumeNow { c.resume() }
+        }
+    }
+
+    func release() {
+        let c: CheckedContinuation<Void, Never>? = lock.withLock {
+            released = true
+            defer { continuation = nil }
+            return continuation
+        }
+        c?.resume()
+    }
 }
 
 /// Writes a short mono 16-bit PCM WAV of silence. Used instead of bundling

@@ -254,12 +254,20 @@ public final class PlaybackController {
                 } else if track.source == .podcast, let p = try? store?.progress(episodeKey: track.id), !p.completed, p.position > 5 {
                     item.startPosition = p.position
                 }
-                guard let self, gen == self.generation, !Task.isCancelled else { return }
+                guard let self else { return }
+                guard gen == self.generation, !Task.isCancelled else {
+                    self.droppedStaleResults += 1
+                    return
+                }
                 let play = self.pendingAutoplayOverride ?? autoplay
                 self.engine.load(item, autoplay: play)
                 if item.startPosition > 0 { self.elapsed = item.startPosition }
             } catch {
-                guard let self, gen == self.generation, !Task.isCancelled else { return }
+                guard let self else { return }
+                guard gen == self.generation, !Task.isCancelled else {
+                    self.droppedStaleResults += 1
+                    return
+                }
                 let failure: PlaybackFailure
                 if let s = error as? SourceError {
                     failure = PlaybackFailure(s == .trackNotFound ? .fileMissing : .sourceUnavailable, s.userMessage)
@@ -367,4 +375,17 @@ public final class PlaybackController {
 
     /// Test hook: number of tracks the user listened past the scrobble point.
     var listenedSeconds: TimeInterval { listened }
+
+    /// Test hook: resolve results discarded because the selection had changed.
+    @ObservationIgnored private(set) var droppedStaleResults = 0
+
+    /// Test hook: returns once no resolve is in flight, including follow-up
+    /// resolves started by auto-skip after a failure.
+    func waitForPendingResolve() async {
+        var last: Task<Void, Never>?
+        while let t = resolveTask, t != last {
+            await t.value
+            last = t
+        }
+    }
 }
