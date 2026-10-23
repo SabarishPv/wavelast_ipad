@@ -1,0 +1,235 @@
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# Builds and tests WaveLast for iPad on a standard GitHub-hosted macOS runner.
+# Standard runners are free for public repositories. No secrets are used.
+#
+# Artifacts:
+#   test-reports      .xcresult bundles + JUnit-style summary (always uploaded)
+#   build-logs        raw xcodebuild / swift logs (always uploaded, incl. failures)
+#   simulator-app     WaveLast.app for the iPad *Simulator* only
+#   unsigned-ipa      device build packaged as .ipa, NOT SIGNED: it cannot be
+#                     installed on an iPad until it is signed (see docs/INSTALL.md)
+
+name: iPad build
+
+on:
+  push:
+    branches: [feature/wavelast-ipad-v1]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # Explicit bash => "-eo pipefail", so `cmd | tee log` fails when cmd fails.
+    shell: bash
+
+concurrency:
+  group: ipad-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  XCODEGEN_VERSION: "2.46.0"
+  XCODEGEN_SHA256: "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806"
+  DERIVED: build/DerivedData
+  LOGS: build/logs
+  REPORTS: build/reports
+
+jobs:
+  build-test:
+    name: Build & test (iPad Simulator)
+    runs-on: macos-26
+    timeout-minutes: 75
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Show revision and toolchain
+        run: |
+          echo "Repository: $GITHUB_REPOSITORY"
+          echo "Ref:        $GITHUB_REF ($(git rev-parse --short HEAD))"
+          sw_vers
+          xcode-select -p
+          xcodebuild -version
+          swift --version
+          xcrun --sdk iphonesimulator --show-sdk-version
+          xcrun simctl list runtimes
+          mkdir -p "$LOGS" "$REPORTS"
+
+      - name: Static configuration checks
+        run: bash scripts/validate_config.sh 2>&1 | tee "$LOGS/validate-config.log"
+
+      - name: Lint Swift sources (swift-format)
+        run: |
+          xcrun swift-format lint --strict --recursive --configuration .swift-format \
+            App Packages/WaveLastKit/Sources Packages/WaveLastKit/Tests 2>&1 | tee "$LOGS/swift-format.log"
+
+      - name: Install XcodeGen ${{ env.XCODEGEN_VERSION }} (pinned, checksum-verified)
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/xcodegen.zip" \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip"
+          echo "${XCODEGEN_SHA256}  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP/xcodegen"
+          echo "$RUNNER_TEMP/xcodegen/xcodegen/bin" >> "$GITHUB_PATH"
+
+      - name: Generate Xcode project
+        run: |
+          xcodegen --version
+          xcodegen generate --spec project.yml 2>&1 | tee "$LOGS/xcodegen.log"
+
+      - name: Package tests on macOS host (swift test)
+        working-directory: Packages/WaveLastKit
+        run: |
+          swift test --parallel 2>&1 | tee "$GITHUB_WORKSPACE/$LOGS/swift-test-macos.log"
+
+      - name: Pick iPad simulator
+        id: sim
+        run: |
+          udid=$(bash scripts/pick_simulator.sh)
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$udid" || true
+          xcrun simctl bootstatus "$udid" -b
+
+      - name: Package tests on iPad Simulator
+        working-directory: Packages/WaveLastKit
+        run: |
+          xcodebuild test \
+            -scheme WaveLastKit-Package \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            -derivedDataPath "$GITHUB_WORKSPACE/$DERIVED/pkg" \
+            -resultBundlePath "$GITHUB_WORKSPACE/$REPORTS/WaveLastKit.xcresult" \
+            2>&1 | tee "$GITHUB_WORKSPACE/$LOGS/package-tests-ipad.log"
+
+      - name: Build, unit tests and UI tests on iPad Simulator
+        run: |
+          # Simulator builds are signed ad hoc ("Sign to Run Locally"), which
+          # gives the app the Keychain entitlement it needs; no certificate.
+          xcodebuild test \
+            -project WaveLast.xcodeproj \
+            -scheme WaveLast \
+            -configuration Debug \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            -derivedDataPath "$DERIVED/app" \
+            -resultBundlePath "$REPORTS/WaveLast.xcresult" \
+            CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= \
+            2>&1 | tee "$LOGS/app-tests-ipad.log"
+
+      - name: Compiler warnings report
+        if: always()
+        run: |
+          # Swift has no separate static analyzer; surface compiler warnings
+          # from the app build so they are reviewed rather than scrolled past.
+          f="$LOGS/app-tests-ipad.log"
+          [ -f "$f" ] || exit 0
+          grep -E "^/.*: warning: " "$f" | sed "s|$GITHUB_WORKSPACE/||" | sort -u > "$LOGS/compiler-warnings.txt" || true
+          n=$(wc -l < "$LOGS/compiler-warnings.txt" | tr -d " ")
+          echo "Compiler warnings: $n"
+          echo "- Compiler warnings: $n (see build-logs/compiler-warnings.txt)" >> "$GITHUB_STEP_SUMMARY"
+          head -50 "$LOGS/compiler-warnings.txt"
+
+      - name: Package simulator app
+        run: |
+          app="$DERIVED/app/Build/Products/Debug-iphonesimulator/WaveLast.app"
+          test -d "$app"
+          mkdir -p build/out
+          ditto -c -k --keepParent "$app" build/out/WaveLast-iPadSimulator.app.zip
+          cat > build/out/README-simulator.txt <<'EOF'
+          WaveLast-iPadSimulator.app.zip runs ONLY in the iOS Simulator (Xcode).
+          It cannot be installed on a physical iPad.
+          EOF
+
+      - name: Build for device (UNSIGNED)
+        run: |
+          xcodebuild build \
+            -project WaveLast.xcodeproj -scheme WaveLast -configuration Release \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "$DERIVED/device" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= DEVELOPMENT_TEAM= \
+            2>&1 | tee "$LOGS/device-build-unsigned.log"
+          app="$DERIVED/device/Build/Products/Release-iphoneos/WaveLast.app"
+          test -d "$app"
+          rm -rf build/ipa && mkdir -p build/ipa/Payload
+          cp -R "$app" build/ipa/Payload/
+          (cd build/ipa && zip -qry ../out/WaveLast-UNSIGNED.ipa Payload)
+          if codesign -dv build/ipa/Payload/WaveLast.app 2>/dev/null; then
+            echo "::error::Expected an unsigned bundle"; exit 1
+          fi
+          cat > build/out/README-ipa.txt <<'EOF'
+          WaveLast-UNSIGNED.ipa — SIGNING STATUS: NOT SIGNED.
+          iPadOS refuses to install unsigned apps. This file must first be signed
+          with an Apple certificate and a provisioning profile that includes your
+          iPad (for example by a sideloading tool using your own Apple Account, or
+          by a paid Apple Developer Program team). See docs/INSTALL.md.
+          EOF
+          shasum -a 256 build/out/WaveLast-UNSIGNED.ipa | tee build/out/SHA256SUMS.txt
+
+      - name: Test summary
+        if: always()
+        run: |
+          {
+            echo "## WaveLast CI"
+            echo "- Commit: \`$(git rev-parse --short HEAD)\` on \`${GITHUB_REF_NAME}\`"
+            echo "- Xcode: $(xcodebuild -version | head -1)"
+            for r in "$REPORTS"/*.xcresult; do
+              [ -d "$r" ] || continue
+              echo "### $(basename "$r")"
+              xcrun xcresulttool get test-results summary --path "$r" --format json 2>/dev/null \
+                | python3 -I -c 'import json,sys; d=json.load(sys.stdin); print("- Result: **%s** — passed %s, failed %s, skipped %s" % (d.get("result"), d.get("passedTests"), d.get("failedTests"), d.get("skippedTests")))' \
+                || echo "- (summary unavailable)"
+            done
+            echo "### Artifacts"
+            echo "- simulator-app: runs in the iPad Simulator only"
+            echo "- unsigned-ipa: **NOT SIGNED**, not installable until signed"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for r in "$REPORTS"/*.xcresult; do
+            [ -d "$r" ] && xcrun xcresulttool get test-results summary --path "$r" --format json > "$REPORTS/$(basename "$r" .xcresult)-summary.json" 2>/dev/null || true
+          done
+
+      - name: Compress test reports
+        if: always()
+        run: |
+          cd "$REPORTS" 2>/dev/null || exit 0
+          for r in *.xcresult; do [ -d "$r" ] && ditto -c -k --keepParent "$r" "$r.zip"; done; true
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            build/reports/*.xcresult.zip
+            build/reports/*.json
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: build/logs/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Upload simulator app
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simulator-app
+          path: |
+            build/out/WaveLast-iPadSimulator.app.zip
+            build/out/README-simulator.txt
+          retention-days: 14
+
+      - name: Upload unsigned device IPA
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-ipa
+          path: |
+            build/out/WaveLast-UNSIGNED.ipa
+            build/out/README-ipa.txt
+            build/out/SHA256SUMS.txt
+          retention-days: 14
