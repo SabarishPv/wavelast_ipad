@@ -1,0 +1,14 @@
+[ti:Sample Song]
+[ar:Sample Artist]
+[al:Sample Album]
+[length:03:20]
+[offset:+500]
+
+[00:12.00]First line
+[00:17.20][01:30.50]Chorus line
+[00:21.1]<00:21.10>Word <00:21.60>timed <00:22.00>line
+[00:25:40]Colon fraction line
+[01:02.345]Three digit fraction
+[ 99:xx ] not a timestamp
+plain text without tag
+[03:00.00]

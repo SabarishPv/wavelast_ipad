@@ -1,0 +1,5 @@
+{"similartracks":{"track":[
+ {"name":"Hyperballad","match":1.0,"artist":{"name":"Björk"}},
+ {"name":"Teardrop","match":"0.83","artist":{"name":"Massive Attack"}},
+ {"name":"Broken entry","match":0.5}
+],"@attr":{"artist":"Björk"}}}

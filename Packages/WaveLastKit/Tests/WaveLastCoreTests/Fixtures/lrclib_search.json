@@ -1,0 +1,5 @@
+[
+ {"id":1,"trackName":"Song Title (Live at Somewhere)","artistName":"The Band","duration":250,"instrumental":false,"plainLyrics":"live words","syncedLyrics":"[00:01.00]live words"},
+ {"id":2,"trackName":"Song Title","artistName":"The Band","duration":201,"instrumental":false,"plainLyrics":"studio words","syncedLyrics":"[00:01.00]studio words"},
+ {"id":3,"trackName":"Different Song","artistName":"Other Artist","duration":200,"instrumental":false,"plainLyrics":"nope","syncedLyrics":null}
+]
