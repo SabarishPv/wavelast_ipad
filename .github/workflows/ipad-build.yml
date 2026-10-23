@@ -87,7 +87,8 @@ jobs:
       - name: Pick iPad simulator
         id: sim
         run: |
-          udid=$(bash scripts/pick_simulator.sh)
+          udid=$(bash scripts/pick_simulator.sh 2> "$LOGS/simulator.txt")
+          cat "$LOGS/simulator.txt"
           echo "udid=$udid" >> "$GITHUB_OUTPUT"
           xcrun simctl boot "$udid" || true
           xcrun simctl bootstatus "$udid" -b
@@ -205,6 +206,25 @@ jobs:
           for r in "$REPORTS"/*.xcresult; do
             [ -d "$r" ] && xcrun xcresulttool get test-results summary --path "$r" --format json > "$REPORTS/$(basename "$r" .xcresult)-summary.json" 2>/dev/null || true
           done
+          # One public notice with the key facts (step summaries and logs are
+          # only visible to signed-in users; annotations are public).
+          {
+            echo "Commit $(git rev-parse --short HEAD) | $(xcodebuild -version | tr '\n' ' ')| iOS Simulator SDK $(xcrun --sdk iphonesimulator --show-sdk-version) | iOS SDK $(xcrun --sdk iphoneos --show-sdk-version)"
+            [ -f "$LOGS/simulator.txt" ] && cat "$LOGS/simulator.txt"
+            for j in "$REPORTS"/*-summary.json; do
+              [ -f "$j" ] || continue
+              python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print("%s: %s, total %s, passed %s, failed %s, skipped %s" % (sys.argv[2], d.get("result"), d.get("totalTestCount"), d.get("passedTests"), d.get("failedTests"), d.get("skippedTests")))' "$j" "$(basename "$j" -summary.json)"
+            done
+            grep -hE "Test run with [0-9]+ tests" "$LOGS/swift-test-macos.log" 2>/dev/null | perl -pe 's/\e\[[0-9;]*m//g; s/^/macOS swift test: /' || true
+            [ -f "$LOGS/compiler-warnings.txt" ] && echo "Compiler warnings (app build): $(wc -l < "$LOGS/compiler-warnings.txt" | tr -d ' ')"
+            [ -f "$LOGS/compiler-warnings.txt" ] && head -15 "$LOGS/compiler-warnings.txt" | cut -c1-300
+            [ -f build/out/SHA256SUMS.txt ] && echo "Unsigned IPA sha256: $(cut -d' ' -f1 build/out/SHA256SUMS.txt)"
+          } > "$REPORTS/ci-notice.txt" 2>&1 || true
+          body=$(cat "$REPORTS/ci-notice.txt")
+          body=${body//'%'/'%25'}
+          body=${body//$'\r'/'%0D'}
+          body=${body//$'\n'/'%0A'}
+          echo "::notice title=CI summary::$body"
 
       - name: Compress test reports
         if: always()
